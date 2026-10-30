@@ -12,7 +12,7 @@ scan_device
 
 Place the file **`mac_sec.sh`** (attached) into the `scan_device` folder.
 
-Your Desktop should look like:
+Your  **Desktop** should look like:
 
 ```
 Desktop/
