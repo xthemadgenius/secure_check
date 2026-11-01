@@ -108,3 +108,81 @@ When reviewing the generated reports, pay attention to:
 - Terminal access
 - Admin password (for sudo)
 - Built-in tools: `zip`, `lsof`, `xattr`, `plutil`, `shasum`, `host`
+
+---
+
+# iPhone Security Scanner v1.0
+
+A companion to the Mac scanner for an **iPhone plugged into the Mac over USB**. It screens the phone, writes one report and packages it into a ZIP. It never installs anything itself: if a tool is missing it prints the install commands and stops. The script does not use `sudo`, so it does not ask for your Mac password.
+
+Run it with `bash ./iphone_sec.sh`. `how-to.md` has the step-by-step version.
+
+## What It Does
+
+### Quick checks (nothing is copied off the phone)
+- Lists the **configuration profiles** installed on the phone
+- Lists the **user-installed apps that are not signed by the App Store**
+
+### Deep scan (optional, asks first)
+- Makes a full **backup** of the phone into a private folder on the Mac (`~/Library/Application Support/secure_check/`) and checks it with Amnesty International's [MVT](https://github.com/mvt-project/mvt) against the public spyware indicator lists
+- The indicator lists are downloaded from the internet. Nothing from the phone is sent
+- An encrypted backup holds more (saved passwords, Wi-Fi settings, website history, Health data, call history), so the script offers to turn backup encryption on. That sets a **backup password on the phone**, which stays until you turn it off in Finder (untick "Encrypt local backup"). The password is briefly visible to other programs on the Mac while the command that sets it runs; the script says so on screen
+- Needs free space about the size of the phone's data and can take a long time
+
+### Report
+Findings are shown on screen and written to the report, each with a tag:
+
+| Tag | Meaning |
+|-----|---------|
+| `DETECTED` | Something known to be linked to spyware was found |
+| `REVIEW` | Needs a look from you |
+| `INFO` | For information |
+| `UNKNOWN` | A check could not run, so it did **not** pass |
+
+A summary line gives the counts, followed by one sentence that only describes what was checked. After the findings come what the scan cannot see and a checklist of things only the phone's owner can check: passcode, iOS update, devices on the Apple Account, Find My, VPN & Device Management, app permissions, message and call forwarding, and Lockdown Mode.
+
+### Fixes (only with `APPLY=1`)
+
+```bash
+APPLY=1 bash ./iphone_sec.sh
+```
+
+- Offers to remove a flagged app or configuration profile, **one item at a time**. Nothing is removed unless you answer `y`
+- After each removal it reads the phone's list again and says whether the item is really gone
+- If anything is `DETECTED`, fixes are switched off: removing things can destroy the evidence an expert needs. The script points to Amnesty International's Security Lab instead
+- Everything else is manual (the checklist)
+
+## Output
+
+```
+~/Desktop/NAME.iPhone_Security_Check/                    <-- folder with the report
+~/Desktop/NAME.iPhone_Security_Check.zip                 <-- ZIP of the same report
+~/Library/Application Support/secure_check/iphone_*      <-- deep scan only: the backup and MVT's raw results (private)
+```
+
+| File | Content |
+|------|---------|
+| `iphone_security_report.txt` | Summary, findings, actions taken, what the scan cannot see, the checklist |
+
+The ZIP holds only the report, never the backup. The private folder holds all of the phone's data and stays on the Mac. At the end the script asks whether to delete it, and whether to delete the report folder and keep only the ZIP.
+
+## What It Cannot See
+
+- "Nothing found" means nothing **known** was found. New or targeted spyware may not be in any public indicator list
+- iCloud / Apple ID compromise, malicious iCloud backups, phishing and SIM swap are not visible over USB
+- Jailbreak status cannot be reliably detected over USB
+- The passcode is only reported when a deep scan's backup says so. Otherwise it is on the checklist
+- Android phones are not covered, and an iPad or iPod is treated as an iPhone
+- A computer cannot clean an iPhone the way it can a Mac: there is no real-time protection, and only apps and profiles can be removed
+
+## Requirements
+
+- macOS (Darwin), an iPhone and a USB cable
+- Terminal access
+- [`pymobiledevice3`](https://github.com/doronz88/pymobiledevice3) and [`mvt`](https://github.com/mvt-project/mvt), installed with `pipx` (the commands are in `how-to.md`)
+- Python 3.8 or newer, and `zip`
+- Runs on the stock macOS bash 3.2
+
+## Status
+
+Checked against stand-in `pymobiledevice3` / `mvt-ios` tools and a fake phone. Only an early, read-only version of the quick checks has run on a real iPhone. The deep scan (backup encryption, the backup itself, MVT on a real backup) and removing an app or profile have not been tried on a real phone yet.
