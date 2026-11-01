@@ -105,6 +105,7 @@ run "ls -la /System/Library/LaunchDaemons 2>/dev/null || true"
 say "\nOptional: unload + remove a suspicious plist (interactive)"
 if [[ "$APPLY" == "1" ]]; then
   if confirm "Unload/remove a LaunchAgent plist from ~/Library/LaunchAgents ?"; then
+    mkdir -p "$QUAR_DIR"
     read -r -p "Enter plist filename (e.g., suspicious.plist): " PLIST
     PLIST_PATH="$HOME/Library/LaunchAgents/$PLIST"
     run "launchctl unload \"$PLIST_PATH\" || true"
@@ -225,7 +226,7 @@ run "ls -la \"$HOME/Library/Application Support/Google/Chrome/Default/Extensions
 
 run "sudo cat /etc/sudoers | sed -n '1,220p'"
 run "sudo ls -la /etc/sudoers.d 2>/dev/null || true"
-run "sudo sh -c 'for f in /etc/sudoers.d/*; do [ -e \"$f\" ] && echo \"--- $f ---\" && cat \"$f\"; done' || true"
+run "sudo sh -c 'for f in /etc/sudoers.d/*; do [ -e \"\$f\" ] && echo \"--- \$f ---\" && cat \"\$f\"; done' || true"
 hr
 
 # ---------- 10) Memory map / code injection quick glance (PID-based) ----------
