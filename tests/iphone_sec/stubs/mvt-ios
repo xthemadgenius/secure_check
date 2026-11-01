@@ -1,0 +1,227 @@
+#!/usr/bin/env python3
+"""Shim in front of the REAL mvt-ios for iphone_sec.sh tests.
+
+Fakes the two things that need the network or a real encrypted backup (download-iocs,
+decrypt-backup); everything else (check-backup, version, ...) runs the REAL mvt-ios, the one in
+$IPHONE_TEST_REAL_MVT (the harness sets it). Without it the shim leaves $STUB_DIR/real_mvt_missing,
+exits 127, and the harness reports that test as skipped.
+Calls are appended to $STUB_DIR/calls.log. Unknown options exit 2 like click would.
+"""
+import datetime
+import json
+import os
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+REAL = os.environ.get("IPHONE_TEST_REAL_MVT")
+STUB_DIR = Path(os.environ["STUB_DIR"])
+FIXTURES = Path(os.environ["STUB_FIXTURES"])
+SC = json.loads((STUB_DIR / "scenario.json").read_text())
+
+
+def usage(msg):
+    sys.stderr.write("Usage: mvt-ios [OPTIONS] COMMAND [ARGS]...\n\nError: %s\n" % msg)
+    sys.exit(2)
+
+
+# Exact text of the real download-iocs run with no network (recorded under a deny-network sandbox)
+REAL_BANNER = ("\n\n        MVT - Mobile Verification Toolkit\n\n        https://mvt.re\n        Version: 2026.10.26\n\n"
+               "        You have not yet downloaded any indicators, check the `download-iocs` \ncommand!\n\n\n")
+NETWORK_DOWN_ERROR = (
+    "ERROR          [mvt.common.updates] Failed to retrieve indicators index from \n"
+    "https://raw.githubusercontent.com/mvt-project/mvt-indicators/main/indicators.yam\n"
+    "l: HTTPSConnectionPool(host='raw.githubusercontent.com', port=443): Max retries \n"
+    "exceeded with url: /mvt-project/mvt-indicators/main/indicators.yaml (Caused by \n"
+    "NameResolutionError(\"HTTPSConnection(host='raw.githubusercontent.com', \n"
+    "port=443): Failed to resolve 'raw.githubusercontent.com' ([Errno 8] nodename nor\n"
+    "servname provided, or not known)\"))\n")
+LEVELS = ("INFORMATIONAL", "LOW", "MEDIUM", "HIGH", "CRITICAL")
+
+
+def fake_check_backup(rest, fake):
+    """A hand-made check-backup run in the real formats (command.log line layout, the 80-column ALERTS panel,
+    alerts.json / info.json), so every outcome the script must judge can be produced on demand.
+    $STUB scenario key mvt_fake: alerts, alerts_raw, counts, log [[level, logger, text]], indicators, no_indicator_line,
+    no_info, no_log, console_raw, exit."""
+    out, backup, j = None, None, 0
+    while j < len(rest):
+        a = rest[j]
+        if a in ("-o", "--output", "-i", "--iocs"):
+            if j + 1 >= len(rest):
+                usage("Option '%s' requires an argument." % a)
+            if a in ("-o", "--output"):
+                out = rest[j + 1]
+            j += 1
+        elif a.startswith("-"):
+            usage("No such option: %s" % a)
+        else:
+            backup = a
+        j += 1
+    if not backup:
+        usage("Missing argument 'BACKUP_PATH'.")
+    if not os.path.isdir(backup):
+        usage("Invalid value for 'BACKUP_PATH': Directory '%s' does not exist." % backup)
+    stamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S,000")
+    lines = []
+    if not fake.get("no_indicator_line"):
+        lines.append(("mvt.ios.cmd_check_backup", "INFO", "Loaded a total of %d unique indicators" % fake.get("indicators", 3)))
+    lines.append(("mvt.ios.cmd_check_backup", "INFO", "Checking iTunes backup located at: %s" % backup))
+    lines.append(("mvt.ios.modules.backup.manifest", "INFO", "Running module Manifest..."))
+    lines += [tuple(x) for x in fake.get("log", [])]
+    alerts = fake.get("alerts")
+    counts = fake.get("counts")
+    if counts is None:
+        counts = {lv: sum(1 for a in (alerts or []) if isinstance(a, dict) and a.get("level") == lv) for lv in LEVELS}
+    if out:
+        os.makedirs(out, exist_ok=True)
+        if fake.get("locked_dir"):              # a result folder that cannot be removed again: a file inside a read-only folder
+            locked = os.path.join(out, "locked")
+            os.makedirs(locked, exist_ok=True)
+            with open(os.path.join(locked, "result.txt"), "w") as fh:
+                fh.write("x")
+            os.chmod(locked, 0o500)
+        if not fake.get("no_log"):
+            with open(os.path.join(out, "command.log"), "w") as fh:
+                fh.write("".join("%s - %s - %s - %s\n" % (stamp, lg, lv, tx) for lg, lv, tx in lines))
+        with open(os.path.join(out, "backup_info.json"), "w") as fh:
+            json.dump({"serial_number": "FAKESERIAL-IN-MVT-RESULTS", "device_name": "Test Phone"}, fh)
+        if "alerts_raw" in fake:
+            with open(os.path.join(out, "alerts.json"), "w") as fh:
+                fh.write(fake["alerts_raw"])
+        elif alerts is not None:
+            with open(os.path.join(out, "alerts.json"), "w") as fh:
+                json.dump(alerts, fh, indent=4)
+        if not fake.get("no_info"):
+            with open(os.path.join(out, "info.json"), "w") as fh:     # written last by the real tool: the completion marker
+                json.dump({"target_path": backup, "mvt_version": "2026.10.26", "ioc_files": [], "hashes": []}, fh)
+    if "console_raw" in fake:
+        sys.stdout.write(fake["console_raw"])
+    else:
+        sys.stdout.write("\n\n        MVT - Mobile Verification Toolkit\n\n        https://mvt.re\n        Version: 2026.10.26\n\n\n\n")
+        for lg, lv, tx in lines:
+            shown = "" if lv == "INFO" else ("FATAL" if lv == "CRITICAL" else lv)    # the real console hides INFO and calls CRITICAL "FATAL"
+            sys.stdout.write("%s[%s] %s\n" % (shown.ljust(15), lg, tx))
+        sys.stdout.write("\n" + panel("ALERTS", ["MVT produced %d %s alerts." % (counts.get(lv, 0), lv) for lv in LEVELS]))
+        advice = ["", "Please seek reputable expert help if you have serious concerns about a",
+                  "possible spyware attack. Such support is available to human rights defenders",
+                  "and civil society through Amnesty International's Security Lab at",
+                  "https://securitylab.amnesty.org/get-help/?c=mvt"]
+        if counts.get("HIGH", 0) + counts.get("CRITICAL", 0) > 0:
+            sys.stdout.write("\n" + panel("WARNING", ["MVT produced HIGH or CRITICAL alerts. Only expert review can confirm if the",
+                                                      "detected indicators are signs of an attack."] + advice))
+        else:
+            sys.stdout.write("\n" + panel("NOTE", ["The lack of severe alerts does not equate to a clean bill of health."] + advice))
+    sys.exit(fake.get("exit", 0))
+
+
+def panel(title, rows):
+    """A Rich panel at 80 columns, as the real console prints it."""
+    return ("╭" + (" %s " % title).center(78, "─") + "╮\n"
+            + "".join("│ " + r.ljust(76) + " │\n" for r in rows)
+            + "╰" + "─" * 78 + "╯\n")
+
+
+def stdin_is_null():
+    """Whether this process's stdin is /dev/null (the script must never hand a tool the terminal or its own input)."""
+    try:
+        return os.path.samestat(os.fstat(0), os.stat(os.devnull))
+    except OSError:
+        return False
+
+
+def env_leak():
+    """Names of the environment variables (other than the one MVT reads) that hold the backup password this stub knows of."""
+    try:
+        pw = json.loads((STUB_DIR / "state.json").read_text()).get("password")
+    except (OSError, ValueError):
+        return []
+    return sorted(k for k, v in os.environ.items() if pw and k != "MVT_IOS_BACKUP_PASSWORD" and pw in v)
+
+
+def main():
+    args = sys.argv[1:]
+    with open(STUB_DIR / "calls.log", "a") as fh:
+        fh.write(json.dumps({"tool": "mvt-ios", "argv": args, "cwd": os.getcwd(), "env_pw": os.environ.get("MVT_IOS_BACKUP_PASSWORD"),
+                             "stdin_null": stdin_is_null(), "env_leak": env_leak()}) + "\n")
+    i = 0
+    while i < len(args) and args[i] in ("--disable-update-check", "--disable-indicator-update-check"):
+        i += 1
+    sub, rest = (args[i] if i < len(args) else None), args[i + 1:]
+
+    if sub == "download-iocs":
+        if rest:
+            usage("Got unexpected extra arguments (%s)" % " ".join(rest))
+        if SC.get("ioc_download_fail"):
+            sys.stderr.write("ERROR: Unable to download indicators (stub)\n")
+            sys.exit(1)
+        # MVT's own default data folder when the variable is not set
+        data = os.environ.get("MVT_DATA_FOLDER") or os.path.join(os.environ["HOME"], "Library", "Application Support", "mvt")
+        target = Path(data) / "indicators"
+        mode = SC.get("ioc_download_mode")
+        if mode == "network_down":
+            # What the real tool does with no network (recorded offline): exit 0, the error on STDOUT, an empty indicators folder
+            target.mkdir(parents=True, exist_ok=True)
+            sys.stdout.write(REAL_BANNER + NETWORK_DOWN_ERROR)
+            return
+        if mode == "nothing":                   # exit 0, no error text, nothing downloaded
+            target.mkdir(parents=True, exist_ok=True)
+            sys.stdout.write(REAL_BANNER)
+            return
+        target.mkdir(parents=True, exist_ok=True)
+        shutil.copy(FIXTURES / SC.get("ioc_fixture", "synth.stix2"), target / "synth.stix2")
+        print("Downloaded 1 indicator file (stub)")
+        return
+
+    if sub == "check-backup" and SC.get("mvt_fake") is not None:      # {} is a valid (all-defaults) fake
+        fake_check_backup(rest, SC["mvt_fake"])
+        return
+
+    if sub == "decrypt-backup":
+        dest, backup, j = None, None, 0
+        while j < len(rest):
+            a = rest[j]
+            if a in ("-d", "--destination"):
+                dest, j = rest[j + 1], j + 1
+            elif a == "--jobs":
+                j += 1
+            elif a in ("-p", "--password", "-k", "--key-file"):
+                j += 1
+            elif a.startswith("-"):
+                usage("No such option: %s" % a)
+            else:
+                backup = a
+            j += 1
+        if not dest or not backup:
+            usage("Missing option '-d' / argument 'BACKUP_PATH'.")
+        state = json.loads((STUB_DIR / "state.json").read_text())
+        if os.environ.get("MVT_IOS_BACKUP_PASSWORD") != state.get("password"):
+            if SC.get("decrypt_echoes_password"):       # a tool that prints back the password it was given: {pw} raw, {repr} Python-quoted, {json} JSON-quoted (ä), {jsonu} JSON-quoted (ä)
+                given = os.environ.get("MVT_IOS_BACKUP_PASSWORD", "")
+                shown = (SC["decrypt_echoes_password"].replace("{pw}", given).replace("{repr}", repr(given))
+                         .replace("{json}", json.dumps(given)).replace("{jsonu}", json.dumps(given, ensure_ascii=False)))
+                sys.stderr.write("CRITICAL: " + shown + "\n")
+            else:
+                sys.stderr.write("CRITICAL: Failed to decrypt backup. Did you provide the correct password? (stub)\n")
+            sys.exit(1)
+        flags = json.loads((Path(backup) / ".stub_flags").read_text())
+        os.makedirs(dest, exist_ok=True)
+        if SC.get("decrypt_empty"):             # exit 0 and a (nearly) empty result: no Manifest.db at all, or a zero-length one
+            if SC["decrypt_empty"] != "missing":
+                (Path(dest) / "Manifest.db").write_bytes(b"")
+            print("Decrypted backup written (stub)")
+            return
+        subprocess.run([sys.executable, str(FIXTURES / "make_synth_backup.py"), dest] + flags, check=True)
+        print("Decrypted backup written (stub)")
+        return
+
+    if not REAL or not os.access(REAL, os.X_OK):
+        (STUB_DIR / "real_mvt_missing").write_text("1")
+        sys.stderr.write("mvt-ios (test stand-in): the real mvt-ios is not installed\n")
+        sys.exit(127)
+    os.execv(REAL, [REAL] + args)
+
+
+if __name__ == "__main__":
+    main()

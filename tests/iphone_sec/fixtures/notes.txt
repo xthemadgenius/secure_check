@@ -1,0 +1,1 @@
+not an indicator file: just some text that happens to sit in the indicators folder

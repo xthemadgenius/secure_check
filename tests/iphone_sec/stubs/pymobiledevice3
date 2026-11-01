@@ -1,0 +1,304 @@
+#!/usr/bin/env python3
+"""Strict stub of the pymobiledevice3 CLI, for iphone_sec.sh tests only (no USB, no network).
+
+Behaviour comes from $STUB_DIR/scenario.json, mutable state from $STUB_DIR/state.json,
+every call is appended to $STUB_DIR/calls.log. Unknown commands or options exit 2 with a
+click-style usage error so a typo in the script under test cannot pass silently.
+"""
+import datetime
+import json
+import os
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+STUB_DIR = Path(os.environ["STUB_DIR"])
+FIXTURES = Path(os.environ["STUB_FIXTURES"])
+SC = json.loads((STUB_DIR / "scenario.json").read_text())
+STATE_PATH = STUB_DIR / "state.json"
+
+
+def load_state():
+    return json.loads(STATE_PATH.read_text())
+
+
+def save_state(state):
+    STATE_PATH.write_text(json.dumps(state))
+
+
+def stdin_is_null():
+    """Whether this process's stdin is /dev/null (the script must never hand a tool the terminal or its own input)."""
+    try:
+        return os.path.samestat(os.fstat(0), os.stat(os.devnull))
+    except OSError:
+        return False
+
+
+def env_leak():
+    """Names of the environment variables (other than the one MVT reads) that hold the backup password this stub knows of."""
+    try:
+        pw = json.loads(STATE_PATH.read_text()).get("password")
+    except (OSError, ValueError):
+        return []
+    return sorted(k for k, v in os.environ.items() if pw and k != "MVT_IOS_BACKUP_PASSWORD" and pw in v)
+
+
+def log_call(argv):
+    with open(STUB_DIR / "calls.log", "a") as fh:
+        fh.write(json.dumps({"tool": "pymobiledevice3", "argv": argv, "cwd": os.getcwd(), "stdin_null": stdin_is_null(),
+                             "env_leak": env_leak()}) + "\n")
+
+
+def err(level, msg):
+    stamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    sys.stderr.write("%s stubhost pymobiledevice3.__main__[1234] %s %s\n" % (stamp, level, msg))
+
+
+def usage(msg):
+    sys.stderr.write("Usage: pymobiledevice3 [OPTIONS] COMMAND [ARGS]...\n\nError: %s\n" % msg)
+    sys.exit(2)
+
+
+def after_removal(state):
+    return bool(state["removed_apps"] or state["removed_profiles"])
+
+
+def dump(obj):
+    print(json.dumps(obj, indent=4, sort_keys=True, ensure_ascii=False))
+
+
+UDID_OPT = {"--udid": "udid"}
+CMDS = {
+    ("usbmux", "list"): ({"--usb", "-u", "--network", "-n", "--simple"}, {}, (0, 0)),
+    ("lockdown", "info"): (set(), UDID_OPT, (0, 0)),
+    ("lockdown", "get"): (set(), UDID_OPT, (0, 2)),
+    ("apps", "list"): ({"--calculate-sizes", "--no-calculate-sizes", "--show-placeholders",
+                        "--no-show-placeholders"}, dict(UDID_OPT, **{"--type": "type", "-t": "type"}), (0, 0)),
+    ("apps", "uninstall"): (set(), UDID_OPT, (1, 1)),
+    ("profile", "list"): (set(), UDID_OPT, (0, 0)),
+    ("profile", "remove"): (set(), UDID_OPT, (1, 1)),
+    ("backup2", "encryption"): (set(), dict(UDID_OPT, **{"--backup-directory": "bdir", "-b": "bdir"}), (0, 2)),
+    ("backup2", "backup"): ({"--full", "--unback"}, dict(UDID_OPT, **{"--password": "pw", "-p": "pw"}), (1, 1)),
+}
+
+
+def parse(argv):
+    if len(argv) < 2 or (argv[0], argv[1]) not in CMDS:
+        usage("No such command '%s'." % " ".join(argv[:2]))
+    flags, valued, (lo, hi) = CMDS[(argv[0], argv[1])]
+    opts, pos, i, only_args = {}, [], 2, False
+    while i < len(argv):
+        a = argv[i]
+        if only_args:                       # after "--" everything is an argument, even if it starts with "-"
+            pos.append(a)
+        elif a == "--":
+            only_args = True
+        elif a in flags:
+            opts[a] = True
+        elif a in valued:
+            if i + 1 >= len(argv):
+                usage("Option '%s' requires an argument." % a)
+            opts[valued[a]] = argv[i + 1]
+            i += 1
+        elif a.startswith("-") and len(a) > 1:
+            usage("No such option: %s" % a)
+        else:
+            pos.append(a)
+        i += 1
+    if not lo <= len(pos) <= hi:
+        usage("Wrong number of arguments for '%s %s'." % (argv[0], argv[1]))
+    return argv[0], argv[1], opts, pos
+
+
+def main():
+    argv = sys.argv[1:]
+    log_call(argv)
+    group, cmd, opts, pos = parse(argv)
+    state = load_state()
+    state.setdefault("resigned", {})
+    udid = opts.get("udid")
+    if udid is not None and group != "usbmux" and udid not in [d["UniqueDeviceID"] for d in SC["devices"]]:
+        err("ERROR", "Device not found: %s" % udid)
+        sys.exit(1)
+
+    if (group, cmd) == ("usbmux", "list"):
+        if SC.get("usbmux_fail"):
+            err("ERROR", "Failed to connect to usbmuxd socket. Make sure it's running.")
+            sys.exit(1)
+        if "usbmux_raw" in SC:
+            print(SC["usbmux_raw"])
+            return
+        devices = SC["devices"]
+        if "--usb" in opts or "-u" in opts:
+            devices = [d for d in devices if d.get("ConnectionType") == "USB"]
+        dump(devices)
+
+    elif (group, cmd) == ("lockdown", "info"):
+        if SC.get("lockdown_fail"):
+            err("ERROR", SC["lockdown_fail"])
+            sys.exit(1)
+        if "lockdown_raw" in SC:
+            print(SC["lockdown_raw"])
+            return
+        dump(SC["lockdown_info"])
+
+    elif (group, cmd) == ("lockdown", "get"):
+        if pos != ["com.apple.mobile.backup", "WillEncrypt"]:
+            err("ERROR", "stub: unexpected lockdown get %s" % pos)
+            sys.exit(1)
+        if SC.get("confirm_sleep") and state["encrypted"]:      # the check made after encryption was turned on is slow (for interrupt tests)
+            (STUB_DIR / "confirm_started").write_text("x")
+            time.sleep(float(SC["confirm_sleep"]))
+        if SC.get("willencrypt_fail"):
+            err("ERROR", SC["willencrypt_fail"])
+            sys.exit(1)
+        if "willencrypt_raw" in SC:
+            print(SC["willencrypt_raw"])
+        else:
+            print(json.dumps(bool(state["encrypted"])))
+
+    elif (group, cmd) == ("apps", "list"):
+        if SC.get("apps_fail"):
+            err("ERROR", SC["apps_fail"])
+            sys.exit(1)
+        if "apps_raw" in SC:
+            print(SC["apps_raw"])
+            return
+        if after_removal(state):
+            if SC.get("relist_fail"):
+                err("ERROR", SC["relist_fail"])
+                sys.exit(1)
+            if "relist_raw" in SC:
+                print(SC["relist_raw"])
+                return
+        apps = {k: dict(v, SignerIdentity=state["resigned"][k]) if k in state["resigned"] else v
+                for k, v in SC["apps"].items() if k not in state["removed_apps"]}
+        wanted = opts.get("type", "Any")
+        if wanted != "Any":
+            apps = {k: v for k, v in apps.items() if v.get("ApplicationType") == wanted}
+        dump(apps)
+        if after_removal(state) and SC.get("relist_late_fail"):
+            err("ERROR", SC["relist_late_fail"])
+            sys.exit(1)
+
+    elif (group, cmd) == ("apps", "uninstall"):
+        if SC.get("uninstall_fail"):
+            err("ERROR", SC["uninstall_fail"])
+            sys.exit(1)
+        if SC.get("uninstall_resign"):
+            state["resigned"][pos[0]] = SC["uninstall_resign"]
+            save_state(state)
+        elif not SC.get("uninstall_noop"):
+            state["removed_apps"].append(pos[0])
+            save_state(state)
+            if SC.get("remove_fail_after"):
+                err("ERROR", SC["remove_fail_after"])
+                sys.exit(1)
+
+    elif (group, cmd) == ("profile", "list"):
+        if SC.get("profiles_fail"):
+            err("ERROR", SC["profiles_fail"])
+            sys.exit(1)
+        if "profiles_raw" in SC:
+            print(SC["profiles_raw"])
+            return
+        if after_removal(state):
+            if SC.get("relist_fail"):
+                err("ERROR", SC["relist_fail"])
+                sys.exit(1)
+            if "relist_raw" in SC:
+                print(SC["relist_raw"])
+                return
+        prof = json.loads(json.dumps(SC["profiles"]))
+        gone = set(state["removed_profiles"])
+        for key in ("ProfileMetadata", "ProfileManifest"):
+            if key in prof:
+                prof[key] = {k: v for k, v in prof[key].items() if k not in gone}
+        if "OrderedIdentifiers" in prof:
+            prof["OrderedIdentifiers"] = [i for i in prof["OrderedIdentifiers"] if i not in gone]
+        dump(prof)
+        if after_removal(state) and SC.get("relist_late_fail"):
+            err("ERROR", SC["relist_late_fail"])
+            sys.exit(1)
+
+    elif (group, cmd) == ("profile", "remove"):
+        meta = SC.get("profiles", {}).get("ProfileMetadata", {})
+        if SC.get("profile_remove_fail"):
+            err("ERROR", SC["profile_remove_fail"])
+            sys.exit(1)
+        if pos[0] in meta and not SC.get("profile_remove_noop"):
+            state["removed_profiles"].append(pos[0])
+            save_state(state)
+            if SC.get("remove_fail_after"):
+                err("ERROR", SC["remove_fail_after"])
+                sys.exit(1)
+        else:
+            err("INFO", "Trying to remove not installed profile: %s" % pos[0])
+
+    elif (group, cmd) == ("backup2", "encryption"):
+        bdir = opts.get("bdir")
+        if bdir is not None and not os.path.isdir(bdir):
+            usage("Invalid value for '--backup-directory' / '-b': Directory '%s' does not exist." % bdir)
+        if not pos:
+            print("on" if state["encrypted"] else "off")
+            return
+        if len(pos) < 2 or not pos[1]:
+            usage("PASSWORD is required when setting encryption on or off.")
+        mode, password = pos[0].lower(), pos[1]
+        if mode not in ("on", "off"):
+            usage("Invalid value for '[MODE]:<on|off>': '%s'" % pos[0])
+        if mode == "on":
+            if SC.get("encryption_writes_file") and bdir is not None:     # a tool that stages files in -b
+                (Path(bdir) / "staged.tmp").write_bytes(b"x")
+            if SC.get("encryption_sleep"):              # a call that is still running (for interrupt tests); the marker says it started
+                (STUB_DIR / "encryption_started").write_text("x")
+                time.sleep(float(SC["encryption_sleep"]))
+            if SC.get("encryption_on_fail"):
+                err("ERROR", SC["encryption_on_fail"])
+                sys.exit(1)
+            if state["encrypted"]:
+                err("ERROR", "Encryption already on!")
+                return
+            if SC.get("encryption_on_noop"):        # says nothing, exits 0, changes nothing
+                return
+            state["encrypted"], state["password"] = True, password
+        else:
+            if not state["encrypted"]:
+                err("ERROR", "Encryption already off!")
+                return
+            if password != state["password"]:
+                err("ERROR", "Wrong backup password")
+                sys.exit(1)
+            state["encrypted"], state["password"] = False, None
+        save_state(state)
+
+    elif (group, cmd) == ("backup2", "backup"):
+        dest = Path(pos[0]) / (udid or SC["devices"][0]["UniqueDeviceID"])
+        flags = list(SC.get("backup_flags", []))
+        if SC.get("backup_fail"):
+            dest.mkdir(parents=True, exist_ok=True)
+            (dest / "Info.plist").write_bytes(b"partial")
+            err("ERROR", SC["backup_fail"])
+            sys.exit(1)
+        if SC.get("backup_empty"):                  # like the real tool when the phone sent nothing: an empty Manifest.plist, exit 0
+            dest.mkdir(parents=True, exist_ok=True)
+            (dest / "Manifest.plist").write_bytes(b"")
+            return
+        if SC.get("backup_sleep"):                  # a backup that is still running (for interrupt tests)
+            dest.mkdir(parents=True, exist_ok=True)
+            (dest / "Info.plist").write_bytes(b"partial")
+            sys.stderr.write("stub: backup started\n")
+            sys.stderr.flush()
+            time.sleep(float(SC["backup_sleep"]))
+        build = list(flags) + (["--encrypted"] if state["encrypted"] else [])
+        subprocess.run([sys.executable, str(FIXTURES / "make_synth_backup.py"), str(dest)] + build, check=True)
+        (dest / ".stub_flags").write_text(json.dumps(flags))
+        err("INFO", "Backup progress: 100%")
+        if SC.get("backup_fail_after"):             # the whole backup is on disk, but the tool still reports a failure
+            err("ERROR", SC["backup_fail_after"])
+            sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
