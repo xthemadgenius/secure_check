@@ -247,7 +247,8 @@ run "security find-identity -v | grep -v \"Apple\" || true"
 run "csrutil status || true"
 run "sudo spctl --status || true"
 # Assessing every app can be noisy; sample Applications root
-run "sudo spctl --assess --verbose /Applications/* 2>/dev/null || true"
+# (loop runs inside sh -c so eval never re-parses app names containing spaces or parentheses)
+run "sh -c 'for app in /Applications/*.app; do sudo spctl --assess --verbose \"\$app\" || true; done'"
 hr
 
 # ---------- 12) Real-time monitoring helpers (print commands, don’t auto-run) ----------
